@@ -2,7 +2,7 @@ Hawk-Eye
 ==
 
 # Objectives
-1. Detect tennis court lines or edges.
+1. Detect tennis court edges.
 2. Detect tennis ball and bounces.
 3. (_Ongoing_) Estimate tennis player poses.
 
@@ -52,13 +52,14 @@ Recall and Precision (w/ score threshold: 0.5, distance threshold 7 pixels)
 | Bounce | 0.6794 | 0.7607 | 89 | 28 | 4484 | 42 |
 
 Demo video
+
 ![demo](./assets/demo.gif)
+
+# Todo
 - [x] Court edge detection
 - [x] Ball detection and bounce detection
 - [ ] Player pose estimation
 - [ ] Match summary (e.g., ball speed, ...)
-
-# Todo
 - [ ] Improve the court edge detection algorithm
   - [ ] Utilize more recent keypoint detection models
     - [ ] _Deep High-Resolution Representation Learning for Human Pose Estimation_, 2019 CVPR
