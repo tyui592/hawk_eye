@@ -15,6 +15,8 @@ Hawk-Eye
   - Use **focal loss** for heatmap training. (Reference: _Object as Points_, arXiv 2019.)
   - Perform data augmentation to enhance robustness against varying camera angles.
   ![data_augmentation](./assets/tennis_data_augmentation.png)
+  - Refining the edge points of a tennis court using image processing.
+  ![line](./assets/line_processing.png)
 - **Catboost** for ball bounce detection.
 
 # Usage
