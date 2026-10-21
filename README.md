@@ -17,27 +17,40 @@ Hawk-Eye
   ![data_augmentation](./assets/tennis_data_augmentation.png)
   - Refining the edge points of a tennis court using image processing.
   ![line](./assets/line_processing.png)
+- **Classical court detector** (`models/court_detector/classical.py`, no learning).
+  - White line pixels by a local contrast test + structure tensor coherence filter.
+  - Hough lines, homography hypotheses from 2 horizontal + 2 vertical line pairs, scored by court model overlap.
+  - Refine the homography by re-fitting court lines to nearby line pixels.
 - **Catboost** for ball bounce detection.
 
 # Usage
 - Requirements
   - catboost
   - torch
+  - torchvision
   - albumentations
+  - opencv-python
+  - numpy
 
 - Scripts
 ```bash
-COURT_DATA="./Datasets/TennisCourtDetector/"
-BALL_DATA="./Datasets/TrackNet/"
+COURT_DATA="./data/TennisCourtDetector/"
+BALL_DATA="./data/TrackNet/"
 
 # Train court detection model
 python main.py --mode 'train' --device 'cuda:0' --task 'court' --save_root './model-store/court/' --data_path ${COURT_DATA} --num_class 14 --epoch 100 --lr_milestone 90 --imsize 576 1024 --aug_policy 1
+
+# Validate the classical (non-learning) court detector
+python val_classical.py --data_path ${COURT_DATA} --num_workers 8
 
 # Train ball detection model
 python main.py --mode 'train' --device 'cuda:1' --task 'ball' --num_class 1 --num_seq 1 --save_root './model-store/ball/' --data_path ${BALL_DATA}  --epoch 100 --lr_milestone 90 --imsize 576 1024 --aug_policy 1
 
 # Train bounce detection model
 python main.py --mode 'train' --device 'cpu' --task 'bounce' --num_seq 3 --data_path ${BALL_DATA} --save_root './model-store/bounce/'
+
+# Image demo (court or ball)
+python main.py --mode 'demo' --device 'cuda:0' --model_path './model-store/court/weights/ckpt.pth' --image_path './sample.png'
 
 # Video demo
 python demo.py --court_model_path './model-store/court/weights/ckpt.pth' --ball_model_path './model-store/ball//weights/ckpt.pth' --bounce_model_path './model-store/bounce/weights/ckpt.cbm' --video_path './sample.mp4'
@@ -50,6 +63,7 @@ Recall and Precision (w/ score threshold: 0.5, distance threshold 7 pixels)
 | Model | Recall | Precision | TP | FP | TN | FN |
 | --- | --- | --- | --- | --- | --- | --- |
 | Court | 0.9620 | 0.9997 | 29662 | 8 | 111 | 1173 |
+| Court (classical, no learning) | 0.9862 | 0.9990 | 30408 | 30 | 89 | 427 |
 | Ball | 0.9216 | 0.9984 | 4372 | 7 | 208 | 372 |
 | Bounce | 0.6794 | 0.7607 | 89 | 28 | 4484 | 42 |
 
