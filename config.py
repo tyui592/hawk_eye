@@ -15,7 +15,7 @@ def build_parser():
 
     parser.add_argument('--mode',
                         type=str,
-                        choices=['train', 'val', 'demo', 'video_demo'],
+                        choices=['train', 'val', 'demo'],
                         default='train')
     parser.add_argument('--device',
                         type=str,
@@ -158,6 +158,11 @@ def build_parser():
                         type=Path,
                         default=None,
                         help='Model weight path')
+
+    parser.add_argument('--image_path',
+                        type=Path,
+                        default=None,
+                        help='Image path for demo')
 
     return parser.parse_args()
 
