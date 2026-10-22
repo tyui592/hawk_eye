@@ -31,6 +31,30 @@ MODEL_SEGMENTS = [
     ((X_INNER_R, Y_TOP), (X_INNER_R, Y_BOTTOM)),
     ((X_CENTER, Y_SERVICE_T), (X_CENTER, Y_SERVICE_B)),
 ]
+# Extensions of the painted segments where no line should exist. Image lines that run
+# through these (net tape, ad boards, ...) are not court lines. A gap is left near the
+# segment ends for the perpendicular lines.
+GAP, EXT = 40, 150
+X_ALLEY_L, X_ALLEY_R = (X_LEFT + GAP, X_INNER_L - GAP), (X_INNER_R + GAP, X_RIGHT - GAP)
+EMPTY_SEGMENTS = [
+    # baselines beyond the doubles sidelines
+    ((X_LEFT - GAP, Y_TOP), (X_LEFT - EXT, Y_TOP)),
+    ((X_RIGHT + GAP, Y_TOP), (X_RIGHT + EXT, Y_TOP)),
+    ((X_LEFT - GAP, Y_BOTTOM), (X_LEFT - EXT, Y_BOTTOM)),
+    ((X_RIGHT + GAP, Y_BOTTOM), (X_RIGHT + EXT, Y_BOTTOM)),
+    # service lines through the alleys
+    ((X_ALLEY_L[0], Y_SERVICE_T), (X_ALLEY_L[1], Y_SERVICE_T)),
+    ((X_ALLEY_R[0], Y_SERVICE_T), (X_ALLEY_R[1], Y_SERVICE_T)),
+    ((X_ALLEY_L[0], Y_SERVICE_B), (X_ALLEY_L[1], Y_SERVICE_B)),
+    ((X_ALLEY_R[0], Y_SERVICE_B), (X_ALLEY_R[1], Y_SERVICE_B)),
+    # center service line beyond the service lines
+    ((X_CENTER, Y_SERVICE_T - GAP), (X_CENTER, Y_SERVICE_T - EXT * 2)),
+    ((X_CENTER, Y_SERVICE_B + GAP), (X_CENTER, Y_SERVICE_B + EXT * 2)),
+    # sidelines beyond the baselines
+    *[((x, Y_TOP - GAP), (x, Y_TOP - EXT)) for x in (X_LEFT, X_RIGHT, X_INNER_L, X_INNER_R)],
+    *[((x, Y_BOTTOM + GAP), (x, Y_BOTTOM + EXT)) for x in (X_LEFT, X_RIGHT, X_INNER_L, X_INNER_R)],
+]
+
 # Each segment as an infinite line: ('h', y) or ('v', x).
 SEGMENT_LINES = [('h', Y_TOP), ('h', Y_BOTTOM), ('h', Y_SERVICE_T), ('h', Y_SERVICE_B),
                  ('v', X_LEFT), ('v', X_RIGHT), ('v', X_INNER_L), ('v', X_INNER_R), ('v', X_CENTER)]
@@ -93,6 +117,37 @@ def homographies_from_points(src, dst):
     return H, valid
 
 
+def camera_from_homographies(H, img_size):
+    """Recover the focal length and camera center from court homographies (batched).
+
+    Assumes square pixels, no skew and the principal point at the image center,
+    so that H ~ K [r1 r2 t] with K = diag(f, f, 1).
+    Returns f (B, nan when no real solution) and camera centers (B x 3, model units).
+    The model z axis points into the ground, so a camera above the court has z < 0.
+    """
+    H = np.asarray(H, dtype=np.float64).reshape(-1, 3, 3)
+    h, w = img_size
+    T = np.array([[1, 0, -w / 2], [0, 1, -h / 2], [0, 0, 1.0]])
+    Hc = T @ H
+    a1, b1, c1 = Hc[:, 0, 0], Hc[:, 1, 0], Hc[:, 2, 0]
+    a2, b2, c2 = Hc[:, 0, 1], Hc[:, 1, 1], Hc[:, 2, 1]
+
+    # r1 . r2 = 0 and |r1| = |r2| are linear in 1 / f^2; solve them in least squares
+    A = np.stack([a1 * a2 + b1 * b2, a1 ** 2 + b1 ** 2 - a2 ** 2 - b2 ** 2], axis=1)
+    B = np.stack([c1 * c2, c1 ** 2 - c2 ** 2], axis=1)
+    inv_f2 = -(A * B).sum(1) / np.maximum((A * A).sum(1), 1e-30)
+    f = np.where(inv_f2 > 0, 1 / np.sqrt(np.abs(inv_f2) + 1e-30), np.nan)
+
+    M = Hc.copy()
+    M[:, :2, :] /= f[:, None, None]
+    scale = 2 / (np.linalg.norm(M[:, :, 0], axis=1) + np.linalg.norm(M[:, :, 1], axis=1))
+    M *= (scale * np.sign(M[:, 2, 2]))[:, None, None]  # the court is in front of the camera
+    r1, r2, t = M[:, :, 0], M[:, :, 1], M[:, :, 2]
+    R = np.stack([r1, r2, np.cross(r1, r2)], axis=2)
+    center = -np.einsum('bji,bj->bi', R, t)
+    return f, center
+
+
 def intersect(l0, l1):
     """Intersection of lines in homogeneous form (a, b, c): ax + by + c = 0."""
     p = np.cross(l0, l1)
@@ -104,8 +159,9 @@ class ClassicalCourtDetector:
 
     def __init__(self,
                  line_tau=(8, 4),
-                 line_min_brightness=110,
-                 line_min_contrast=15,
+                 line_min_brightness=40,
+                 line_min_contrast=8,
+                 line_rel_contrast=0.15,
                  coherence_sigma=3.0,
                  min_coherence=0.5,
                  hough_threshold=50,
@@ -115,20 +171,28 @@ class ClassicalCourtDetector:
                  score_tolerance=3,
                  refine_band=8,
                  refine_iters=3,
-                 top_k=10):
+                 top_k=10,
+                 empty_penalty=1.0,
+                 focal_range=(0.5, 6.0),
+                 camera_height_range=(150, 3000)):
         """Init.
 
         - line_tau: (horizontal, vertical) offset of the local contrast test.
           Should be larger than the line width in pixels.
         - line_min_brightness / line_min_contrast: thresholds of the contrast test.
+        - line_rel_contrast: contrast threshold relative to the neighbor brightness.
         - coherence_sigma / min_coherence: structure tensor filter that keeps linear structures.
         - max_lines: number of candidate lines kept per family.
         - score_tolerance: pixel tolerance when scoring a homography.
         - refine_band: half width of the search band when refining lines.
+        - focal_range: allowed focal length in units of the image width. None disables the camera filter.
+        - camera_height_range: allowed camera height in model units (~cm).
+        - empty_penalty: penalty for line pixels on EMPTY_SEGMENTS (e.g. net tape matched as a baseline).
         """
         self.line_tau = line_tau
         self.line_min_brightness = line_min_brightness
         self.line_min_contrast = line_min_contrast
+        self.line_rel_contrast = line_rel_contrast
         self.coherence_sigma = coherence_sigma
         self.min_coherence = min_coherence
         self.hough_threshold = hough_threshold
@@ -139,9 +203,14 @@ class ClassicalCourtDetector:
         self.refine_band = refine_band
         self.refine_iters = refine_iters
         self.top_k = top_k
+        self.empty_penalty = empty_penalty
+        self.focal_range = focal_range
+        self.camera_height_range = camera_height_range
 
         self.coarse_points, self.coarse_owners = sample_segments(MODEL_SEGMENTS, step=40)
         self.fine_points, self.fine_owners = sample_segments(MODEL_SEGMENTS, step=10)
+        self.coarse_empty_points, _ = sample_segments(EMPTY_SEGMENTS, step=20)
+        self.fine_empty_points, _ = sample_segments(EMPTY_SEGMENTS, step=10)
         self.matrix = None
         self.score = 0.0
 
@@ -149,18 +218,20 @@ class ClassicalCourtDetector:
         """Binary mask of white line pixels.
 
         A pixel belongs to a line when it is bright and the pixels at distance tau
-        on both sides (horizontally or vertically) are darker.
+        on both sides (horizontally or vertically) are darker. The contrast threshold
+        is relative to the neighbors so that lines in shadow are kept.
 
         img: RGB numpy image (h, w, 3)
         """
         gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY).astype(np.int16)
         tx, ty = self.line_tau
         c = self.line_min_contrast
+        r = self.line_rel_contrast
 
         def darker_both_sides(axis, tau):
             fwd = np.roll(gray, tau, axis=axis)
             bwd = np.roll(gray, -tau, axis=axis)
-            return (gray - fwd > c) & (gray - bwd > c)
+            return (gray - fwd > np.maximum(c, r * fwd)) & (gray - bwd > np.maximum(c, r * bwd))
 
         mask = (gray > self.line_min_brightness) & (darker_both_sides(1, tx) | darker_both_sides(0, ty))
 
@@ -307,11 +378,28 @@ class ClassicalCourtDetector:
         ok &= (near_w >= far_w * 0.95) & (near_w < far_w * 4)
         ok &= (far_w > w * 0.1) & (near_w < w * 4)
         ok &= (bl[:, 1] - tl[:, 1] > h * 0.15)
+
+        # physically plausible broadcast camera (about twice the range seen in the dataset)
+        if self.focal_range is None:
+            return ok
+        f, center = camera_from_homographies(H, img_size)
+        f_min, f_max = self.focal_range
+        z_min, z_max = self.camera_height_range
+        ok &= (f > f_min * w) & (f < f_max * w)
+        ok &= (-center[:, 2] > z_min) & (-center[:, 2] < z_max)
+        ok &= center[:, 1] > Y_BOTTOM
         return ok
 
-    def score_homographies(self, H, dist_map, points, chunk=20000):
-        """Score = number of projected model points lying on line pixels - penalty for misses."""
+    def score_homographies(self, H, dist_map, points, empty_points=None, chunk=20000):
+        """Score = hits on line pixels - penalty for misses - penalty for lines where none should be.
+
+        points: samples on painted model segments
+        empty_points: samples on model regions where no line should exist
+        """
         h, w = dist_map.shape
+        num_points = len(points)
+        if empty_points is not None:
+            points = np.concatenate([points, empty_points])
         scores = np.empty(len(H))
         for s in range(0, len(H), chunk):
             proj, _ = project(H[s:s + chunk], points)
@@ -322,7 +410,8 @@ class ClassicalCourtDetector:
             d[inside] = dist_map[y[inside], x[inside]]
             hit = d <= self.score_tolerance
             miss = inside & ~hit
-            scores[s:s + chunk] = hit.sum(1) - 0.5 * miss.sum(1)
+            scores[s:s + chunk] = hit[:, :num_points].sum(1) - 0.5 * miss[:, :num_points].sum(1) \
+                - self.empty_penalty * hit[:, num_points:].sum(1)
         return scores
 
     def refine(self, H, mask_points, img_size):
@@ -390,7 +479,7 @@ class ClassicalCourtDetector:
             return np.zeros((14, 2)).tolist(), [0.0] * 14
 
         dist_map = cv2.distanceTransform(255 - mask, cv2.DIST_L2, 3)
-        scores = self.score_homographies(H, dist_map, self.coarse_points)
+        scores = self.score_homographies(H, dist_map, self.coarse_points, self.coarse_empty_points)
         top = np.argsort(-scores)[:self.top_k]
 
         ys, xs = np.nonzero(mask)
@@ -398,7 +487,7 @@ class ClassicalCourtDetector:
         best_H, best_score = None, -np.inf
         for k in top:
             H_ref = self.refine(H[k], mask_points, img_size)
-            score = self.score_homographies(H_ref[None], dist_map, self.fine_points)[0]
+            score = self.score_homographies(H_ref[None], dist_map, self.fine_points, self.fine_empty_points)[0]
             if score > best_score:
                 best_H, best_score = H_ref, score
 
