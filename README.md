@@ -18,9 +18,11 @@ Hawk-Eye
   - Refining the edge points of a tennis court using image processing.
   ![line](./assets/line_processing.png)
 - **Classical court detector** (`models/court_detector/classical.py`, no learning).
-  - White line pixels by a local contrast test + structure tensor coherence filter.
-  - Hough lines, homography hypotheses from 2 horizontal + 2 vertical line pairs, scored by court model overlap.
+  - White line pixels by a relative local contrast test (robust to shadows) + structure tensor coherence filter.
+  - Hough lines, homography hypotheses from 2 horizontal + 2 vertical line pairs, scored by court model overlap and penalized for lines where the court has none (e.g. net tape).
+  - Reject physically implausible homographies by recovering the camera (focal length, height, position).
   - Refine the homography by re-fitting court lines to nearby line pixels.
+  - Step-by-step walkthrough with intermediate results: [notebooks/classical_court_detection.ipynb](./notebooks/classical_court_detection.ipynb)
 - **Catboost** for ball bounce detection.
 
 # Usage
@@ -63,7 +65,7 @@ Recall and Precision (w/ score threshold: 0.5, distance threshold 7 pixels)
 | Model | Recall | Precision | TP | FP | TN | FN |
 | --- | --- | --- | --- | --- | --- | --- |
 | Court | 0.9620 | 0.9997 | 29662 | 8 | 111 | 1173 |
-| Court (classical, no learning) | 0.9862 | 0.9990 | 30408 | 30 | 89 | 427 |
+| Court (classical, no learning) | 0.9893 | 0.9997 | 30505 | 9 | 110 | 330 |
 | Ball | 0.9216 | 0.9984 | 4372 | 7 | 208 | 372 |
 | Bounce | 0.6794 | 0.7607 | 89 | 28 | 4484 | 42 |
 
