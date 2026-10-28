@@ -10,8 +10,8 @@ Candidate generation + trajectory selection in the spirit of Yan, Christmas & Ki
    velocity.
 3. Tracklets: grow each seed forward and backward with a constant-velocity prediction,
    allowing short gaps.
-4. Selection: long tracklets claim frames first; short gaps inside a tracklet are
-   linearly interpolated.
+4. Selection: high-quality tracklets claim frames first; short gaps inside a tracklet
+   are linearly interpolated. Optional motion_prior then checks the final output path.
 """
 
 import cv2
@@ -26,7 +26,8 @@ class ClassicalBallTracker:
                  seed_gate=80, seed_accel=8, grow_radius=12, grow_radius_ratio=0.5,
                  max_gap=4, min_track_len=6, min_track_speed=2.5, speed_ref=15,
                  chain=False, chain_gap=15, chain_overlap=2, chain_radius=30, chain_speed=40,
-                 velocity_offset=0.1):
+                 velocity_offset=0.1, motion_prior=False, max_step=80,
+                 motion_reset=5, repair_radius=12):
         """Initialize with parameters.
 
         - diff_threshold: minimum gray-level difference against both neighbours.
@@ -44,6 +45,10 @@ class ClassicalBallTracker:
         - chain*: keep only the best spatio-temporally consistent chain of tracklets (`_chain`).
           Off by default: it lowered recall on game9 (0.80 -> 0.69).
         - velocity_offset: output position is shifted by this fraction of the velocity.
+        - motion_prior: select a reachable subset of final positions, then try candidate repairs.
+        - max_step: maximum image displacement per frame at 1280px width and 30fps.
+        - motion_reset: restart freely only after this many missing frames.
+        - repair_radius: maximum distance from a short-gap bridge to a repair candidate.
         """
         self.diff_threshold = diff_threshold
         self.min_area = min_area
@@ -69,6 +74,15 @@ class ClassicalBallTracker:
         self.chain_radius = chain_radius
         self.chain_speed = chain_speed
         self.velocity_offset = velocity_offset
+        self.motion_prior = motion_prior
+        self.max_step = max_step
+        self.motion_reset = motion_reset
+        self.repair_radius = repair_radius
+        self.motion_scale = 1.0
+        self.fps = 30.0
+        self.frame_size = None
+        if max_step <= 0 or motion_reset < 1 or repair_radius < 0:
+            raise ValueError('invalid motion prior parameters')
         if align:
             self.orb = cv2.ORB_create(1000)
             self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
@@ -285,14 +299,85 @@ class ClassicalBallTracker:
                     v = (np.array(positions[t + 1]) - np.array(positions[t - 1])) / 2
                     shifted[t] = tuple(np.array(positions[t]) + self.velocity_offset * v)
             positions = shifted
+        if self.motion_prior:
+            positions, scores = self.enforce_motion(positions, scores, cands)
         return positions, scores
+
+    def enforce_motion(self, positions, scores, cands):
+        """Keep the maximum-weight reachable path and repair short rejected excursions.
+
+        Uses image displacement, not metric 3D speed. A long disappearance permits a
+        fresh start; impacts may change direction freely. No acceleration penalty is used.
+        """
+        ts = np.array([t for t, p in enumerate(positions) if p is not None], dtype=int)
+        if len(ts) < 2:
+            return list(positions), list(scores)
+        points = np.array([positions[t] for t in ts])
+        weights = np.array([scores[t] for t in ts])
+        limit = self.max_step * self.motion_scale
+        best, parent = weights.copy(), np.full(len(ts), -1, dtype=int)
+        # A DAG (time increases along edges). Missing observations have zero reward.
+        for j in range(1, len(ts)):
+            dt = ts[j] - ts[:j]
+            reachable = (dt > self.motion_reset) | (np.linalg.norm(points[:j] - points[j], axis=1) <= limit * dt)
+            values = np.where(reachable, best[:j], -np.inf)
+            i = int(np.argmax(values))
+            if values[i] > 0:
+                best[j], parent[j] = values[i] + weights[j], i
+        kept = []
+        j = int(np.argmax(best))
+        while j >= 0:
+            kept.append(int(ts[j]))
+            j = parent[j]
+        kept.sort()
+        out, confidence = [None] * len(positions), [0.0] * len(scores)
+        for t in kept:
+            out[t], confidence[t] = positions[t], scores[t]
+        # Repair only newly rejected positions, not every pre-existing empty frame.
+        # Snapshot endpoints avoid propagating a speculative replacement into later repairs.
+        for a, b in zip(kept, kept[1:]):
+            if b - a > self.motion_reset or b == a + 1:
+                continue
+            p0, p1 = np.array(out[a]), np.array(out[b])
+            proposed = []
+            for t in range(a + 1, b):
+                if positions[t] is None or not len(cands[t]):
+                    continue
+                expected = p0 + (p1 - p0) * ((t - a) / (b - a))
+                xy = cands[t][:, :2] + self.velocity_offset * (p1 - p0) / (b - a)
+                distance = np.linalg.norm(xy - expected, axis=1)
+                feasible = ((np.linalg.norm(xy - p0, axis=1) <= limit * (t - a))
+                            & (np.linalg.norm(xy - p1, axis=1) <= limit * (b - t)))
+                if self.frame_size is not None:
+                    h, w = self.frame_size
+                    feasible &= (xy[:, 0] >= 0) & (xy[:, 0] < w) & (xy[:, 1] >= 0) & (xy[:, 1] < h)
+                distance[~feasible] = np.inf
+                i = int(np.argmin(distance))
+                if distance[i] <= self.repair_radius * self.motion_scale:
+                    proposed.append((t, tuple(xy[i])))
+            # Check every bridge edge as a whole, including neighbouring repairs.
+            bridge = [(a, tuple(p0))] + proposed + [(b, tuple(p1))]
+            if all(np.linalg.norm(np.array(q) - p) <= limit * (v - u)
+                   for (u, p), (v, q) in zip(bridge, bridge[1:])):
+                for t, p in proposed:
+                    out[t], confidence[t] = p, 0.75
+        return out, confidence
 
     def __call__(self, frames):
         """Track the ball in a list of BGR or gray frames.
 
-        Output: positions [(x, y) or None], scores [float], candidates [(k, 4) array].
+        Output: positions [(x, y) or None], scores [float], candidates [(k, 5) array].
+        Set fps to the source frame rate (default 30) for motion-prior scaling.
         """
+        if not frames:
+            return [], [], []
+        if self.fps <= 0:
+            raise ValueError('fps must be positive')
+        self.motion_scale = frames[0].shape[1] / 1280 * 30 / self.fps
+        self.frame_size = frames[0].shape[:2]
         gray = [f if f.ndim == 2 else cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
+        if len(gray) == 1:
+            return [None], [0.0], [np.zeros((0, 5))]
         cands = [np.zeros((0, 5))]
         for t in range(1, len(gray) - 1):
             cands.append(self.detect_candidates(gray[t - 1], gray[t], gray[t + 1]))

@@ -8,7 +8,7 @@ python vis_ball_classical.py --video_path ./data/DemoVideos/0.mp4 --save_dir ./d
 - --video_path: any video. Long videos are tracked in chunks of --chunk frames.
 - Court gating is enabled by default; --no_court_gate disables it for comparison.
 
-Drawing: red = tracked, yellow = interpolated inside a tracklet, fading trail of the last
+Drawing: red = tracked, yellow = interpolated or repaired, fading trail of the last
 --trail frames, green ring = ground truth, gray dots = candidates (--show_cands).
 """
 
@@ -101,6 +101,7 @@ def render_clip(clip, out_path, tracker, args):
     """Render a TrackNet clip with ground truth and per-frame status."""
     rows, gts = load_labels(clip)
     frames = [cv2.imread(str(clip / r['file name'])) for r in rows]
+    tracker.fps = args.fps
     gate = make_gate(args, args.fps)
     records = gate(frames) if gate else None
     positions, scores, cands = track_court_segments(frames, tracker, records) if gate else tracker(frames)
@@ -123,11 +124,14 @@ def render_video(video_path, out_path, tracker, args):
     if not cap.isOpened() or fps <= 0:
         raise ValueError(f'cannot read video: {video_path}')
     gate = make_gate(args, fps)
+    tracker.fps = fps
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if args.max_frames:
         total = min(total, args.max_frames)
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     writer = open_writer(out_path, fps, (w, h))
+    comparison = open_writer(out_path.with_name(out_path.stem + '_comparison.mp4'), fps, (w * 2, h)) \
+        if args.compare_motion else None
     done, tracked = 0, 0
     court_frames, records_all = 0, []
     with tqdm(total=total) as pbar:
@@ -141,20 +145,44 @@ def render_video(video_path, out_path, tracker, args):
             if not frames:
                 break
             records = gate(frames) if gate else None
+            baseline = None
+            if comparison is not None:
+                enabled = tracker.motion_prior
+                tracker.motion_prior = False
+                try:
+                    baseline = track_court_segments(frames, tracker, records) if gate else tracker(frames)
+                finally:
+                    tracker.motion_prior = enabled
             positions, scores, cands = track_court_segments(frames, tracker, records) if gate else tracker(frames)
             if records is not None:
                 court_frames += sum(r['active'] for r in records)
                 records_all.extend(dict(r, frame=done + t, tracked=bool(scores[t] > SCORE_THRESHOLD))
                                    for t, r in enumerate(records))
+                for t, r in enumerate(records_all[-len(frames):]):
+                    r['pred'] = None if positions[t] is None else list(map(float, positions[t]))
+                    if baseline is not None:
+                        r['baseline_pred'] = None if baseline[0][t] is None else list(map(float, baseline[0][t]))
             for t, img in enumerate(frames):
                 tracked += scores[t] > SCORE_THRESHOLD
-                writer.write(draw(img, t, positions, scores, cands[t], None, None, args.trail, args.show_cands,
-                                  index=done + t, court_records=records))
+                before = None
+                if comparison is not None:
+                    before = draw(img.copy(), t, baseline[0], baseline[1], baseline[2][t],
+                                  trail=args.trail, index=done + t, court_records=records)
+                    cv2.putText(before, 'BEFORE', (20, h - 20), 0, 1, (255, 255, 255), 2)
+                after = draw(img, t, positions, scores, cands[t], None, None, args.trail, args.show_cands,
+                             index=done + t, court_records=records)
+                writer.write(after)
+                if comparison is not None:
+                    cv2.putText(after, 'MOTION PRIOR', (20, h - 20), 0, 1, (255, 255, 255), 2)
+                    comparison.write(np.hstack([before, after]))
             done += len(frames)
             pbar.update(len(frames))
     cap.release()
     writer.release()
+    if comparison is not None:
+        comparison.release()
     summary = {'frames': done, 'tracked': int(tracked), 'court_gate': gate is not None}
+    summary['tracker_params'] = json.loads(args.params)
     if gate:
         summary.update(court_frames=int(court_frames), court_checks=gate.checks)
         out_path.with_suffix('.court.json').write_text(json.dumps(records_all), encoding='utf-8')
@@ -178,11 +206,14 @@ def main():
     parser.add_argument('--no_court_gate', action='store_true', help='disable court gating for comparison')
     parser.add_argument('--court_interval', type=int, default=None, help='court check interval in frames (default: 1 second)')
     parser.add_argument('--court_min_score', type=float, default=0.5)
+    parser.add_argument('--compare_motion', action='store_true', help='also save a side-by-side prior-off/on video')
     args = parser.parse_args()
     if (args.clip is None) == (args.video_path is None):
         parser.error('give exactly one of --clip or --video_path')
     if args.chunk < 3 or (args.court_interval is not None and args.court_interval < 1):
         parser.error('chunk must be >= 3 and court_interval must be positive')
+    if args.compare_motion and (args.video_path is None or not json.loads(args.params).get('motion_prior')):
+        parser.error('compare_motion requires video_path and motion_prior=true')
 
     tracker = ClassicalBallTracker(**json.loads(args.params))
     args.save_dir.mkdir(parents=True, exist_ok=True)
