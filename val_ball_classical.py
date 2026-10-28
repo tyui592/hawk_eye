@@ -66,7 +66,9 @@ def run_clip(args):
     """Track one clip and compute per-frame statuses."""
     clip, params = args
     rows, gts = load_labels(clip)
-    frames = [cv2.imread(str(clip / r['file name']), cv2.IMREAD_GRAYSCALE) for r in rows]
+    # Read BGR like a video stream; IMREAD_GRAYSCALE decodes JPEG luma differently around the
+    # (small, yellow) ball and changed game10/Clip1 TP from 305 to 262.
+    frames = [cv2.imread(str(clip / r['file name'])) for r in rows]
     tracker = ClassicalBallTracker(**params)
     positions, scores, cands = tracker(frames)
 
