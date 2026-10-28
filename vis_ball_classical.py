@@ -40,8 +40,11 @@ def open_writer(path, fps, size):
     raise RuntimeError(f'cannot open a video writer for {path}')
 
 
-def draw(img, t, positions, scores, cands=None, gt=None, status=None, trail=10, show_cands=False):
-    """Draw the tracker output of frame t (and optionally ground truth / status) on a BGR image."""
+def draw(img, t, positions, scores, cands=None, gt=None, status=None, trail=10, show_cands=False, index=None):
+    """Draw the tracker output of frame t (and optionally ground truth / status) on a BGR image.
+
+    index: frame number to print (default t).
+    """
     if show_cands and cands is not None:
         for c in cands:
             cv2.circle(img, (int(c[0]), int(c[1])), 2, COLOR_CAND, -1, cv2.LINE_AA)
@@ -60,7 +63,7 @@ def draw(img, t, positions, scores, cands=None, gt=None, status=None, trail=10, 
     if positions[t] is not None and scores[t] > SCORE_THRESHOLD:
         color = COLOR_TRACKED if scores[t] == 1.0 else COLOR_INTERP
         cv2.circle(img, tuple(map(round, positions[t])), 5, color, 2, cv2.LINE_AA)
-    text = f'{t:05d}'
+    text = f'{t if index is None else index:05d}'
     if status is not None:
         text += f'  {status.upper()}'
     cv2.putText(img, text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
@@ -108,7 +111,8 @@ def render_video(video_path, out_path, tracker, args):
             positions, scores, cands = tracker(frames)
             for t, img in enumerate(frames):
                 tracked += scores[t] > SCORE_THRESHOLD
-                writer.write(draw(img, t, positions, scores, cands[t], None, None, args.trail, args.show_cands))
+                writer.write(draw(img, t, positions, scores, cands[t], None, None, args.trail, args.show_cands,
+                                  index=done + t))
             done += len(frames)
             pbar.update(len(frames))
     cap.release()
