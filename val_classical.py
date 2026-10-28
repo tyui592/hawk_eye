@@ -8,8 +8,9 @@ python val_classical.py --data_path ./data/TennisCourtDetector/ --num_workers 8 
 With --save_dir, saves
 - results.json: raw outputs (keypoints, scores, homography, ...) and per-point status
 - summary.csv: one row per image sorted by the number of wrong points
+- fail_triage.csv: failed rows grouped by mismatch extent
 - metrics.txt: overall metrics
-- vis/fail/*.jpg, vis/ok/*.jpg: visualizations
+- vis/fail/*.jpg, vis/ok/*.jpg: visualizations selected by --save_vis
 """
 
 import argparse
@@ -82,7 +83,7 @@ def visualize(img, result):
 
 def process(item):
     """Run the detector on a single image and optionally save the visualization."""
-    image_path, gt_kps, save_dir = item
+    image_path, gt_kps, split, save_dir, save_vis = item
     bgr = cv2.imread(str(image_path))
     h, w = bgr.shape[:2]
     detector = ClassicalCourtDetector()
@@ -95,6 +96,7 @@ def process(item):
 
     result = {
         'id': image_path.stem,
+        'split': split,
         'image_size': [h, w],
         'keypoints': keypoints,
         'scores': scores,
@@ -107,77 +109,136 @@ def process(item):
         'court_score': float(detector.score),
     }
 
-    if save_dir is not None:
+    should_save = save_dir is not None and (save_vis == 'all' or
+                                             (save_vis == 'fail' and result['num_wrong'] > 0))
+    if should_save:
         sub = 'fail' if result['num_wrong'] > 0 else 'ok'
+        result['vis'] = f"vis/{sub}/{result['id']}.jpg"
         cv2.imwrite(str(save_dir / 'vis' / sub / f"{result['id']}.jpg"), visualize(bgr, result),
                     [cv2.IMWRITE_JPEG_QUALITY, 90])
+    else:
+        result['vis'] = None
     return result
 
 
+def save_fail_triage(save_dir, results):
+    """Save failed rows grouped by the extent of their mismatch."""
+    with open(save_dir / 'fail_triage.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['split', 'id', 'kind', 'num_wrong', 'court_score', 'mean_error', 'vis'])
+        for r in sorted(results, key=lambda r: (-r['num_wrong'], r['court_score'])):
+            if r['num_wrong'] == 0:
+                continue
+            if r['num_wrong'] == 1:
+                kind = 'single_point'
+            elif r['num_wrong'] <= 3:
+                kind = 'partial_2_3'
+            else:
+                kind = 'global_4_plus'
+            writer.writerow([r['split'], r['id'], kind, r['num_wrong'],
+                             f"{r['court_score']:.4f}", f"{r['mean_error']:.2f}", r['vis'] or ''])
+
+
 def save_results(save_dir, results, metrics):
-    """Save raw results, a per-image summary and metrics."""
+    """Save raw results, per-image summaries and metrics."""
     with open(save_dir / 'results.json', 'w') as f:
         json.dump(results, f)
 
     with open(save_dir / 'summary.csv', 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['id', 'num_wrong', 'wrong_points', 'court_score', 'mean_error', 'vis'])
+        writer.writerow(['split', 'id', 'num_wrong', 'wrong_points', 'court_score', 'mean_error', 'vis'])
         for r in sorted(results, key=lambda r: (-r['num_wrong'], r['court_score'])):
             wrong = [str(i) for i, s in enumerate(r['status']) if s in ('fn', 'fp')]
-            sub = 'fail' if r['num_wrong'] > 0 else 'ok'
-            writer.writerow([r['id'], r['num_wrong'], ' '.join(wrong), f"{r['court_score']:.4f}",
-                             f"{r['mean_error']:.2f}", f"vis/{sub}/{r['id']}.jpg"])
+            writer.writerow([r['split'], r['id'], r['num_wrong'], ' '.join(wrong),
+                             f"{r['court_score']:.4f}", f"{r['mean_error']:.2f}", r['vis'] or ''])
 
     with open(save_dir / 'metrics.txt', 'w') as f:
         f.write(metrics + '\n')
+    save_fail_triage(save_dir, results)
+
+
+def calculate_metrics(results):
+    """Calculate the existing court metric for a list of result rows."""
+    criterion = Criterion(alpha=2.0, beta=4.0)
+    confusion = defaultdict(int)
+    errors = []
+    for result in results:
+        kps = [gt for gt in result['gt_keypoints'] if gt is not None]
+        labels = [str(i) for i, gt in enumerate(result['gt_keypoints']) if gt is not None]
+        targets = {'raw_keypoints': [kps], 'raw_labels': [labels]}
+        criterion.calc_confusion(
+            confusion, [result['keypoints']], [result['scores']], targets,
+            score_threshold=SCORE_THRESHOLD, distance_threshold=DISTANCE_THRESHOLD,
+        )
+        errors.append(criterion.calc_pixel_dist([result['keypoints']], [result['scores']], targets))
+    recall = confusion['tp'] / max(confusion['tp'] + confusion['fn'], 1)
+    precision = confusion['tp'] / max(confusion['tp'] + confusion['fp'], 1)
+    return confusion, float(np.mean(errors)), recall, precision
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_path', type=Path, default=Path('./data/TennisCourtDetector/'))
-    parser.add_argument('--image_set', type=str, default='val', choices=['train', 'val'])
+    parser.add_argument('--image_set', type=str, default='val', choices=['train', 'val', 'all'])
     parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--save_dir', type=Path, default=None,
                         help='Directory to save raw results and visualizations')
+    parser.add_argument('--save_vis', choices=['all', 'fail', 'none'], default='all',
+                        help='visualizations to save when save_dir is set')
     args = parser.parse_args()
 
     if args.save_dir is not None:
         args.save_dir = start_run(args.save_dir, 'court_detection', 'classical-v3', 'evaluation',
-                                  str(args.data_path / f'data_{args.image_set}.json'),
-                                  model_parameters(ClassicalCourtDetector))
-        (args.save_dir / 'vis' / 'ok').mkdir(parents=True, exist_ok=True)
-        (args.save_dir / 'vis' / 'fail').mkdir(parents=True, exist_ok=True)
+                                  [str(args.data_path / f'data_{split}.json')
+                                   for split in (['train', 'val'] if args.image_set == 'all' else [args.image_set])],
+                                  {**model_parameters(ClassicalCourtDetector), 'save_vis': args.save_vis})
+        if args.save_vis in ('all', 'fail'):
+            (args.save_dir / 'vis' / 'fail').mkdir(parents=True, exist_ok=True)
+        if args.save_vis == 'all':
+            (args.save_dir / 'vis' / 'ok').mkdir(parents=True, exist_ok=True)
 
-    labels = json.load(open(args.data_path / f'data_{args.image_set}.json'))
-    items = [(args.data_path / 'images' / f"{data['id']}.png", data['kps'], args.save_dir) for data in labels]
+    splits = ['train', 'val'] if args.image_set == 'all' else [args.image_set]
+    labels = [(split, data) for split in splits
+              for data in json.load(open(args.data_path / f'data_{split}.json'))]
+    items = [(args.data_path / 'images' / f"{data['id']}.png", data['kps'], split,
+              args.save_dir, args.save_vis) for split, data in labels]
 
     with ProcessPoolExecutor(args.num_workers) as executor:
         results = list(tqdm(executor.map(process, items, chunksize=4), total=len(items)))
 
-    criterion = Criterion(alpha=2.0, beta=4.0)
-    confusion = defaultdict(int)
-    errors = []
-    for r in results:
-        kps = [gt for gt in r['gt_keypoints'] if gt is not None]
-        kp_labels = [str(i) for i, gt in enumerate(r['gt_keypoints']) if gt is not None]
-        targets = {'raw_keypoints': [kps], 'raw_labels': [kp_labels]}
-        criterion.calc_confusion(confusion, [r['keypoints']], [r['scores']], targets)
-        errors.append(criterion.calc_pixel_dist([r['keypoints']], [r['scores']], targets))
-
-    recall = confusion['tp'] / (confusion['tp'] + confusion['fn'])
-    precision = confusion['tp'] / (confusion['tp'] + confusion['fp'])
+    confusion, error, recall, precision = calculate_metrics(results)
     num_fail = sum(r['num_wrong'] > 0 for r in results)
     metrics = '\n'.join([
         f"Images: {len(results)}, Images with wrong points: {num_fail}",
-        f"Error: {np.mean(errors):1.4f}",
+        f"Error: {error:1.4f}",
         f"TP: {confusion['tp']}, FP: {confusion['fp']}, TN: {confusion['tn']}, FN: {confusion['fn']}",
         f"Recall: {recall:1.4f}, Precision: {precision:1.4f}",
     ])
+    split_summaries = {}
+    if args.image_set == 'all':
+        for split in splits:
+            subset = [r for r in results if r['split'] == split]
+            split_confusion, split_error, split_recall, split_precision = calculate_metrics(subset)
+            split_wrong = sum(r['num_wrong'] > 0 for r in subset)
+            split_summaries[split] = {
+                'images': len(subset), 'wrong_images': split_wrong, 'error': split_error,
+                'recall': split_recall, 'precision': split_precision,
+                'confusion': dict(split_confusion),
+            }
+            metrics += (f'\n{split}: Images {len(subset)}, wrong {split_wrong}, '
+                        f'Error {split_error:.4f}, Recall {split_recall:.4f}, '
+                        f'Precision {split_precision:.4f}')
     print(metrics)
 
     if args.save_dir is not None:
         save_results(args.save_dir, results, metrics)
-        finish_run(args.save_dir, dict(recall=recall, precision=precision, images=len(results)))
+        summary = {
+            'images': len(results), 'wrong_images': num_fail, 'error': error,
+            'recall': recall, 'precision': precision, 'confusion': dict(confusion),
+        }
+        if split_summaries:
+            summary['splits'] = split_summaries
+        finish_run(args.save_dir, summary)
         print(f"Saved to {args.save_dir}")
 
 

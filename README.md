@@ -45,6 +45,12 @@ python main.py --mode 'train' --device 'cuda:0' --task 'court' --save_root './mo
 # Validate the classical (non-learning) court detector
 python val_classical.py --data_path ${COURT_DATA} --num_workers 8
 
+# Create the separately reviewed-label dataset, then evaluate train + val
+python prepare_court_dataset_v3.py
+python val_classical.py --data_path ./data/TennisCourtDetector_v3_reviewed \
+  --image_set all --num_workers 8 --save_vis fail \
+  --save_dir ./data/outputs/court_detection/classical-v3/tenniscourt-all-reviewed-new
+
 # Train ball detection model
 python main.py --mode 'train' --device 'cuda:1' --task 'ball' --num_class 1 --num_seq 1 --save_root './model-store/ball/' --data_path ${BALL_DATA}  --epoch 100 --lr_milestone 90 --imsize 576 1024 --aug_policy 1
 
