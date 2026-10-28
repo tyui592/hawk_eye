@@ -60,6 +60,12 @@ python demo.py --court_model_path './model-store/court/weights/ckpt.pth' --ball_
 
 
 # Result
+
+Local experiment records and versioned artifacts: [experiment index](./docs/experiments/README.md)
+and [output catalog](./data/outputs/README.md). Results are grouped by `court_detection`,
+`ball_tracking`, and `pipeline`, then method/version and run. These docs and artifacts
+are local-only under the repository's current Git policy.
+
 Recall and Precision (w/ score threshold: 0.5, distance threshold 7 pixels)
 
 | Model | Recall | Precision | TP | FP | TN | FN |

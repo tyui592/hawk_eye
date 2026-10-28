@@ -1,7 +1,7 @@
 """Save a video of the classical ball tracker output.
 
-python vis_ball_classical.py --clip game10/Clip1 --save_dir ./data/outputs/classical_ball_v1_videos/
-python vis_ball_classical.py --video_path ./data/DemoVideos/0.mp4 --save_dir ./data/outputs/classical_ball_v1_videos/
+python vis_ball_classical.py --clip game10/Clip1
+python vis_ball_classical.py --video_path ./data/DemoVideos/0.mp4
 
 - --clip: a TrackNet clip (frames + Label.csv). Draws the ground truth and the per-frame
   status (TP/FN/FP/TN) with the same rule as `val_ball_classical.py`.
@@ -22,6 +22,8 @@ from tqdm import tqdm
 
 from models.ball_detector.classical import ClassicalBallTracker
 from models.ball_detector.court_gate import CourtGate, track_court_segments
+from models.court_detector.classical import ClassicalCourtDetector
+from utils.experiment_outputs import start_run, finish_run, model_parameters
 from val_ball_classical import load_labels, frame_status, SCORE_THRESHOLD
 
 # BGR colors
@@ -181,7 +183,8 @@ def render_video(video_path, out_path, tracker, args):
     writer.release()
     if comparison is not None:
         comparison.release()
-    summary = {'frames': done, 'tracked': int(tracked), 'court_gate': gate is not None}
+    summary = {'frames': done, 'tracked': int(tracked), 'court_gate': gate is not None,
+               'fps': fps, 'width': w, 'height': h}
     summary['tracker_params'] = json.loads(args.params)
     if gate:
         summary.update(court_frames=int(court_frames), court_checks=gate.checks)
@@ -195,7 +198,8 @@ def main():
     parser.add_argument('--data_path', type=Path, default=Path('./data/TrackNet/'))
     parser.add_argument('--clip', type=str, default=None, help='comma-separated game*/Clip*')
     parser.add_argument('--video_path', type=Path, default=None)
-    parser.add_argument('--save_dir', type=Path, default=Path('./data/outputs/classical_ball_court_gated_videos/'))
+    parser.add_argument('--save_dir', type=Path, default=None,
+                        help='fresh output directory; default: target/version/timestamp under data/outputs')
     parser.add_argument('--params', type=str, default='{}',
                         help='JSON of ClassicalBallTracker keyword arguments')
     parser.add_argument('--fps', type=float, default=None, help='default: 30 for clips, source fps for videos')
@@ -215,17 +219,31 @@ def main():
     if args.compare_motion and (args.video_path is None or not json.loads(args.params).get('motion_prior')):
         parser.error('compare_motion requires video_path and motion_prior=true')
 
-    tracker = ClassicalBallTracker(**json.loads(args.params))
-    args.save_dir.mkdir(parents=True, exist_ok=True)
+    params = json.loads(args.params)
+    tracker = ClassicalBallTracker(**params)
+    target = 'ball_tracking' if args.no_court_gate else 'pipeline'
+    version = ('classical-v3b-motion' if tracker.motion_prior else 'classical-v1b') if args.no_court_gate else \
+        ('classical-v3b-court-gate-motion' if tracker.motion_prior else 'classical-v2-court-gate')
+    settings = dict(ball=model_parameters(ClassicalBallTracker, params),
+                    court=model_parameters(ClassicalCourtDetector) if not args.no_court_gate else None,
+                    court_gate=not args.no_court_gate, court_interval=args.court_interval,
+                    court_min_score=args.court_min_score, fps_override=args.fps,
+                    chunk=args.chunk, max_frames=args.max_frames, compare_motion=args.compare_motion)
+    args.save_dir = start_run(args.save_dir, target, version, 'demo',
+                              args.clip or str(args.video_path), settings)
+    summaries = {}
     if args.clip:
         args.fps = args.fps or 30
         for c in args.clip.split(','):
             out_path = args.save_dir / f"{c.replace('/', '_')}.mp4"
             counts = render_clip(args.data_path / c, out_path, tracker, args)
+            summaries[c] = counts
             print(out_path, counts)
     else:
         out_path = args.save_dir / f'{args.video_path.stem}.mp4'
-        print(out_path, render_video(args.video_path, out_path, tracker, args))
+        summaries = render_video(args.video_path, out_path, tracker, args)
+        print(out_path, summaries)
+    finish_run(args.save_dir, summaries)
 
 
 if __name__ == '__main__':

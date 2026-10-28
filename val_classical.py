@@ -3,7 +3,7 @@
 Uses the same metric as `val.py` (score > 0.5 and distance < 7 pixels).
 
 python val_classical.py --data_path ./data/TennisCourtDetector/ --num_workers 8 \
-    --save_dir ./data/outputs/classical_court_val/
+    --save_dir ./data/outputs/court_detection/classical-v3/tenniscourt-val-new/
 
 With --save_dir, saves
 - results.json: raw outputs (keypoints, scores, homography, ...) and per-point status
@@ -25,6 +25,7 @@ from tqdm import tqdm
 
 from models.court_detector.classical import ClassicalCourtDetector, MODEL_SEGMENTS, project
 from models.court_detector.loss import Criterion
+from utils.experiment_outputs import start_run, finish_run, model_parameters
 
 SCORE_THRESHOLD = 0.5
 DISTANCE_THRESHOLD = 7
@@ -141,6 +142,9 @@ def main():
     args = parser.parse_args()
 
     if args.save_dir is not None:
+        args.save_dir = start_run(args.save_dir, 'court_detection', 'classical-v3', 'evaluation',
+                                  str(args.data_path / f'data_{args.image_set}.json'),
+                                  model_parameters(ClassicalCourtDetector))
         (args.save_dir / 'vis' / 'ok').mkdir(parents=True, exist_ok=True)
         (args.save_dir / 'vis' / 'fail').mkdir(parents=True, exist_ok=True)
 
@@ -173,6 +177,7 @@ def main():
 
     if args.save_dir is not None:
         save_results(args.save_dir, results, metrics)
+        finish_run(args.save_dir, dict(recall=recall, precision=precision, images=len(results)))
         print(f"Saved to {args.save_dir}")
 
 

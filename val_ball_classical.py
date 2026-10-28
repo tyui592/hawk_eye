@@ -8,7 +8,7 @@ Reads the raw TrackNet layout (game*/Clip*/Label.csv). The val split is game9 an
 game10 (the original data_val.pkl split is unknown).
 
 python val_ball_classical.py --data_path ./data/TrackNet/ --num_workers 8 \
-    --save_dir ./data/outputs/classical_ball_val/
+    --save_dir ./data/outputs/ball_tracking/classical-v1b/tracknet-game9-game10-new/
 
 With --save_dir, saves
 - results.json: per-frame prediction, score, ground truth and status
@@ -28,6 +28,7 @@ import numpy as np
 from tqdm import tqdm
 
 from models.ball_detector.classical import ClassicalBallTracker
+from utils.experiment_outputs import start_run, finish_run, model_parameters
 
 SCORE_THRESHOLD = 0.5
 DISTANCE_THRESHOLD = 7
@@ -124,6 +125,10 @@ def main():
         clips = [args.data_path / c for c in args.clips.split(',')]
     else:
         clips = [c for g in VAL_GAMES for c in sorted((args.data_path / g).glob('Clip*'), key=lambda p: int(p.name[4:]))]
+    if args.save_dir is not None:
+        version = 'classical-v3b-motion' if params.get('motion_prior', False) else 'classical-v1b'
+        args.save_dir = start_run(args.save_dir, 'ball_tracking', version, 'evaluation',
+                                  [str(c) for c in clips], model_parameters(ClassicalBallTracker, params))
     with ProcessPoolExecutor(args.num_workers) as ex:
         per_clip = list(tqdm(ex.map(run_clip, [(c, params) for c in clips]), total=len(clips)))
     results = [r for rs in per_clip for r in rs]
@@ -141,7 +146,6 @@ def main():
     print('\n'.join(lines))
 
     if args.save_dir is not None:
-        args.save_dir.mkdir(parents=True, exist_ok=False)
         (args.save_dir / 'metrics.txt').write_text('\n'.join(lines) + '\n')
         with open(args.save_dir / 'results.json', 'w') as f:
             json.dump(results, f)
@@ -152,6 +156,7 @@ def main():
                 s = summarize(rs)
                 writer.writerow([f'{clip.parent.name}/{clip.name}', len(rs), s['tp'], s['fp'], s['tn'], s['fn'],
                                  f"{s['recall']:.4f}", f"{s['precision']:.4f}", f"{s['cand_recall']:.4f}"])
+        finish_run(args.save_dir, m)
 
 
 if __name__ == '__main__':
