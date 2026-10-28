@@ -74,12 +74,30 @@ are local-only under the repository's current Git policy.
 
 Recall and Precision (w/ score threshold: 0.5, distance threshold 7 pixels)
 
-| Model | Recall | Precision | TP | FP | TN | FN |
-| --- | --- | --- | --- | --- | --- | --- |
-| Court | 0.9620 | 0.9997 | 29662 | 8 | 111 | 1173 |
-| Court (classical, no learning) | 0.9893 | 0.9997 | 30505 | 9 | 110 | 330 |
-| Ball | 0.9216 | 0.9984 | 4372 | 7 | 208 | 372 |
-| Bounce | 0.6794 | 0.7607 | 89 | 28 | 4484 | 42 |
+| Model | Evaluation split / labels | Recall | Precision | TP | FP | TN | FN |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Court (DL Hourglass) | val 2,211 / original | 0.9620 | 0.9997 | 29662 | 8 | 111 | 1173 |
+| Court (classical v3, no learning) | val 2,211 / original | 0.989298 | 0.999705 | 30505 | 9 | 110 | 330 |
+| Court (classical v3, no learning) | train 6,630 / original | 0.988632 | 0.999891 | 91486 | 10 | 272 | 1052 |
+| Court (classical v3, no learning) | train + val 8,841 / original | 0.988798 | 0.999844 | 121991 | 19 | 382 | 1382 |
+| Court (classical v3, no learning) | val 2,211 / v3-reviewed | 1.000000 | 1.000000 | 30843 | 0 | 111 | 0 |
+| Court (classical v3, no learning) | train + val 8,841 / v3-reviewed | 0.991474 | 0.999918 | 122329 | 10 | 383 | 1052 |
+| Ball | original validation baseline | 0.9216 | 0.9984 | 4372 | 7 | 208 | 372 |
+| Bounce | original validation baseline | 0.6794 | 0.7607 | 89 | 28 | 4484 | 42 |
+
+The owner reviewed all 102 classical-v3 val failures and judged the original GT
+incorrect. A separate dataset, `data/TennisCourtDetector_v3_reviewed`, replaces
+those images' complete 14-point labels with the approved v3 projections; the
+original dataset and all train labels remain unchanged. The reviewed-val result
+measures agreement with these v3-derived labels, not independent accuracy.
+
+The original train + val row combines saved train and original-val confusion
+counts; both val runs produced identical detections. DL was evaluated only on the
+original val labels, so compare it with the classical original-val row. Classical
+v3 needs no training, but its parameters were developed using val; the expanded
+evaluation is not an external test. The 295 train mismatches await manual review.
+See the [court experiment record](./docs/experiments/court_detection.md#ct-004-결과)
+and [saved evaluation](./data/outputs/court_detection/classical-v3/tenniscourt-all-v3-reviewed-labels/RUN.md).
 
 Demo video
 
