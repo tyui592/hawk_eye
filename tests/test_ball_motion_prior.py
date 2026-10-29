@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from models.ball_detector.classical import ClassicalBallTracker
+from hawk_eye.models.ball_detector.classical import ClassicalBallTracker
 
 
 class MotionPriorTest(unittest.TestCase):

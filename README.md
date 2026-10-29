@@ -17,7 +17,7 @@ Hawk-Eye
   ![data_augmentation](./assets/tennis_data_augmentation.png)
   - Refining the edge points of a tennis court using image processing.
   ![line](./assets/line_processing.png)
-- **Classical court detector** (`models/court_detector/classical.py`, no learning).
+- **Classical court detector** (`hawk_eye/models/court_detector/classical.py`, no learning).
   - White line pixels by a relative local contrast test (robust to shadows) + structure tensor coherence filter.
   - Hough lines, homography hypotheses from 2 horizontal + 2 vertical line pairs, scored by court model overlap and penalized for lines where the court has none (e.g. net tape).
   - Reject physically implausible homographies by recovering the camera (focal length, height, position).
@@ -34,35 +34,51 @@ Hawk-Eye
   - opencv-python
   - numpy
 
-- Scripts
+- Scripts (run from the repository root; no installation step)
 ```bash
 COURT_DATA="./data/TennisCourtDetector/"
 BALL_DATA="./data/TrackNet/"
 
 # Train court detection model
-python main.py --mode 'train' --device 'cuda:0' --task 'court' --save_root './model-store/court/' --data_path ${COURT_DATA} --num_class 14 --epoch 100 --lr_milestone 90 --imsize 576 1024 --aug_policy 1
+python -m hawk_eye.cli.main --mode 'train' --device 'cuda:0' --task 'court' --save_root './model-store/court/' --data_path ${COURT_DATA} --num_class 14 --epoch 100 --lr_milestone 90 --imsize 576 1024 --aug_policy 1
 
 # Validate the classical (non-learning) court detector
-python val_classical.py --data_path ${COURT_DATA} --num_workers 8
+python -m hawk_eye.cli.eval_court --data_path ${COURT_DATA} --num_workers 8
 
 # Create the separately reviewed-label dataset, then evaluate train + val
-python prepare_court_dataset_v3.py
-python val_classical.py --data_path ./data/TennisCourtDetector_v3_reviewed \
+python -m hawk_eye.cli.prepare_court_dataset
+python -m hawk_eye.cli.eval_court --data_path ./data/TennisCourtDetector_v3_reviewed \
   --image_set all --num_workers 8 --save_vis fail \
   --save_dir ./data/outputs/court_detection/classical-v3/tenniscourt-all-reviewed-new
 
 # Train ball detection model
-python main.py --mode 'train' --device 'cuda:1' --task 'ball' --num_class 1 --num_seq 1 --save_root './model-store/ball/' --data_path ${BALL_DATA}  --epoch 100 --lr_milestone 90 --imsize 576 1024 --aug_policy 1
+python -m hawk_eye.cli.main --mode 'train' --device 'cuda:1' --task 'ball' --num_class 1 --num_seq 1 --save_root './model-store/ball/' --data_path ${BALL_DATA}  --epoch 100 --lr_milestone 90 --imsize 576 1024 --aug_policy 1
 
 # Train bounce detection model
-python main.py --mode 'train' --device 'cpu' --task 'bounce' --num_seq 3 --data_path ${BALL_DATA} --save_root './model-store/bounce/'
+python -m hawk_eye.cli.main --mode 'train' --device 'cpu' --task 'bounce' --num_seq 3 --data_path ${BALL_DATA} --save_root './model-store/bounce/'
 
 # Image demo (court or ball)
-python main.py --mode 'demo' --device 'cuda:0' --model_path './model-store/court/weights/ckpt.pth' --image_path './sample.png'
+python -m hawk_eye.cli.main --mode 'demo' --device 'cuda:0' --data_path "${COURT_DATA}" --model_path './model-store/court/weights/ckpt.pth' --image_path './sample.png'
 
 # Video demo
-python demo.py --court_model_path './model-store/court/weights/ckpt.pth' --ball_model_path './model-store/ball//weights/ckpt.pth' --bounce_model_path './model-store/bounce/weights/ckpt.cbm' --video_path './sample.mp4'
+python -m hawk_eye.cli.demo --court_model_path './model-store/court/weights/ckpt.pth' --ball_model_path './model-store/ball//weights/ckpt.pth' --bounce_model_path './model-store/bounce/weights/ckpt.cbm' --video_path './sample.mp4'
+
+# DL validation (loads model arguments from the checkpoint's experiment)
+python -m hawk_eye.cli.main --mode val --task court --data_path "${COURT_DATA}" --model_path './model-store/court/weights/ckpt.pth'
+
+# Classical ball evaluation and court-gated visualization
+python -m hawk_eye.cli.eval_ball --data_path "${BALL_DATA}" --clips game10/Clip1,game10/Clip6
+python -m hawk_eye.cli.visualize_ball --data_path "${BALL_DATA}" --clip game10/Clip1
+
+# Inspect historical output organization without modifying files
+python -m hawk_eye.cli.organize_outputs
 ```
+
+Code lives in `hawk_eye/`: `cli` handles commands, `engine` runs training and DL
+evaluation, `evaluation` handles classical metrics and visualization, and `pipelines`
+connects video models. Import classes through `hawk_eye.models.…`; legacy root
+modules are removed. Data, weights and notebook outputs remain in their existing
+locations. Checkpoint state keys and `arguments.pkl` are unchanged.
 
 
 # Result
